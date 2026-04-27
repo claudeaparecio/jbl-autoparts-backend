@@ -56,14 +56,25 @@ const getMyTransactionStatistics = async (req, res) => {
       }
     ]);
 
-    const [todayStats] = await Transactions.aggregate(pipeline(startOfToday));
-    const [yesterdayStats] = await Transactions.aggregate(pipeline(startOfYesterday, endOfYesterday));
-    const [thisWeekStats] = await Transactions.aggregate(pipeline(startOfWeek));
-    const [lastWeekStats] = await Transactions.aggregate(pipeline(startOfLastWeek, endOfLastWeek));
-    const [thisMonthStats] = await Transactions.aggregate(pipeline(startOfMonth));
-    const [lastMonthStats] = await Transactions.aggregate(pipeline(startOfLastMonth, endOfLastMonth));
-    const [thisYearStats] = await Transactions.aggregate(pipeline(startOfYear));
-    const [lastYearStats] = await Transactions.aggregate(pipeline(startOfLastYear, endOfLastYear));
+    const [
+      [todayStats],
+      [yesterdayStats],
+      [thisWeekStats],
+      [lastWeekStats],
+      [thisMonthStats],
+      [lastMonthStats],
+      [thisYearStats],
+      [lastYearStats],
+    ] = await Promise.all([
+      Transactions.aggregate(pipeline(startOfToday)),
+      Transactions.aggregate(pipeline(startOfYesterday, endOfYesterday)),
+      Transactions.aggregate(pipeline(startOfWeek)),
+      Transactions.aggregate(pipeline(startOfLastWeek, endOfLastWeek)),
+      Transactions.aggregate(pipeline(startOfMonth)),
+      Transactions.aggregate(pipeline(startOfLastMonth, endOfLastMonth)),
+      Transactions.aggregate(pipeline(startOfYear)),
+      Transactions.aggregate(pipeline(startOfLastYear, endOfLastYear)),
+    ]);
 
     const formatStats = (stats = {}) => ({
       total: stats.total ?? 0,
@@ -115,19 +126,21 @@ const getUserTransactions = async (req, res) => {
       ...(search && { invoiceId: { $regex: search, $options: "i" } })
     }
 
-    const total = await Transactions.countDocuments(transactionsFilter);
-
-    const transactions = await Transactions.find(transactionsFilter)
-      .populate('items._id') // optional: to get full product details
-      .populate('partsman', 'name') // optional: get partsman name
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit);;
+    const [total, transactions] = await Promise.all([
+      Transactions.countDocuments(transactionsFilter),
+      Transactions.find(transactionsFilter)
+        .populate("items._id")
+        .populate("partsman", "name")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+    ]);
 
     const transformed = transactions.map((txn) => ({
-      ...txn.toObject(),
+      ...txn,
       items: txn.items.map((item) => ({
-        product: item._id, // populated product
+        product: item._id,
         count: item.count,
       })),
     }));
@@ -162,18 +175,20 @@ const getTransactions = async (req, res) => {
       ? { invoiceId: { $regex: search, $options: "i" } }
       : {};
 
-    const total = await Transactions.countDocuments(searchFilter);
-
-    const transactions = await Transactions.find(searchFilter)
-      .populate('items._id')
-      .populate('partsman', 'name')
-      .populate('cashier', 'name')
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit);
+    const [total, transactions] = await Promise.all([
+      Transactions.countDocuments(searchFilter),
+      Transactions.find(searchFilter)
+        .populate("items._id")
+        .populate("partsman", "name")
+        .populate("cashier", "name")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+    ]);
 
     const response = transactions.map((txn) => ({
-      ...txn.toObject(),
+      ...txn,
       items: txn.items.map((item) => ({
         product: item._id,
         count: item.count,
@@ -217,30 +232,27 @@ const cancelTransaction = async (req, res) => {
       throw new Error("Transaction already cancelled.");
     }
 
-    // Revert each product's stock
-    for (const { _id: productId, count } of transaction.items) {
-      const product = await Products.findById(productId).session(session);
-      if (!product) {
-        throw new Error(`Product with ID ${productId} not found.`);
-      }
+    const productIds = transaction.items.map((i) => i._id);
+    const productDocs = await Products.find({ _id: { $in: productIds } }).session(session).lean();
+    const productMap = new Map(productDocs.map((p) => [p._id.toString(), p]));
 
-      let status = 'available';
+    await Promise.all(
+      transaction.items.map(({ _id: productId, count }) => {
+        const product = productMap.get(productId.toString());
+        if (!product) throw new Error(`Product with ID ${productId} not found.`);
 
-      if ((product.quantityRemaining + count) === product.quantityThreshold) {
-        status = 'low_in_stock'
-      }
+        const newQty = product.quantityRemaining + count;
+        let status = "available";
+        if (newQty === 0) status = "out_of_stock";
+        else if (newQty <= product.quantityThreshold) status = "low_in_stock";
 
-      await Products.findByIdAndUpdate(
-        productId,
-        {
-          $inc: {
-            quantityRemaining: count
-          },
-          status,
-        },
-        { session }
-      );
-    }
+        return Products.findByIdAndUpdate(
+          productId,
+          { $inc: { quantityRemaining: count }, status },
+          { session }
+        );
+      })
+    );
 
     // Mark transaction as cancelled
     transaction.status = "cancelled";
@@ -281,31 +293,27 @@ const returnTransaction = async (req, res) => {
       throw new Error("Only completed transactions can be returned.");
     }
 
-    // Restore each product's stock
-    for (const { _id: productId, count } of transaction.items) {
-      const product = await Products.findById(productId).session(session);
-      if (!product) {
-        throw new Error(`Product with ID ${productId} not found.`);
-      }
+    const productIds = transaction.items.map((i) => i._id);
+    const productDocs = await Products.find({ _id: { $in: productIds } }).session(session).lean();
+    const productMap = new Map(productDocs.map((p) => [p._id.toString(), p]));
 
-      const updatedQuantity = product.quantityRemaining + count;
-      let status = 'available';
+    await Promise.all(
+      transaction.items.map(({ _id: productId, count }) => {
+        const product = productMap.get(productId.toString());
+        if (!product) throw new Error(`Product with ID ${productId} not found.`);
 
-      if (updatedQuantity === 0) {
-        status = 'out_of_stock';
-      } else if (updatedQuantity <= product.quantityThreshold) {
-        status = 'low_in_stock';
-      }
+        const newQty = product.quantityRemaining + count;
+        let status = "available";
+        if (newQty === 0) status = "out_of_stock";
+        else if (newQty <= product.quantityThreshold) status = "low_in_stock";
 
-      await Products.findByIdAndUpdate(
-        productId,
-        {
-          $inc: { quantityRemaining: count },
-          status,
-        },
-        { session }
-      );
-    }
+        return Products.findByIdAndUpdate(
+          productId,
+          { $inc: { quantityRemaining: count }, status },
+          { session }
+        );
+      })
+    );
 
     // Update transaction status to 'returned'
     transaction.status = "returned";
@@ -586,196 +594,129 @@ const getSalesStatistics = async (req, res, next) => {
     startOfLastMonth.setMonth(startOfCurrentMonth.getMonth() - 1);
     const endOfLastMonth = new Date(startOfCurrentMonth);
 
-    const [totalSalesStats] = await Transactions.aggregate([
-      {
-        $match: {
-          status: "completed",
-          createdAt: { $gte: startOfCurrentMonth, $lt: new Date(now.getFullYear(), now.getMonth() + 1, 1) },
-        },
-      },
-      {
-        $group: {
-          _id: null,
-          totalSales: { $sum: 1 },
-          totalIncome: { $sum: "$total" },
-        },
-      },
-    ]);
+    const endOfCurrentMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
 
-    const activeProducts = await Products.countDocuments({
-      quantityRemaining: { $gt: 0 },
-      is_deleted: false,
-      updatedAt: { $gte: startOfCurrentMonth, $lt: new Date(now.getFullYear(), now.getMonth() + 1, 1) },
-    });
-
-
-    const dailySales = await Transactions.aggregate([
-      {
-        $match: {
-          status: "completed",
-          createdAt: { $gte: past7Days },
-        },
-      },
-      {
-        $group: {
-          _id: { $dayOfWeek: "$createdAt" },
-          amount: { $sum: "$total" },
-        },
-      },
-      {
-        $addFields: {
-          day: {
-            $let: {
-              vars: {
-                days: [null, "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+    const [
+      [totalSalesStats],
+      activeProducts,
+      dailySales,
+      weeklySales,
+      monthlySales,
+      topSellingResults,
+      [lastMonthStats],
+      [inventoryValueResult],
+      [lastMonthInventoryValueResult],
+      lowStockCount,
+      lowStockLastMonth,
+      lastMonthActiveProducts,
+    ] = await Promise.all([
+      Transactions.aggregate([
+        { $match: { status: "completed", createdAt: { $gte: startOfCurrentMonth, $lt: endOfCurrentMonth } } },
+        { $group: { _id: null, totalSales: { $sum: 1 }, totalIncome: { $sum: "$total" } } },
+      ]),
+      Products.countDocuments({
+        quantityRemaining: { $gt: 0 },
+        is_deleted: false,
+        updatedAt: { $gte: startOfCurrentMonth, $lt: endOfCurrentMonth },
+      }),
+      Transactions.aggregate([
+        { $match: { status: "completed", createdAt: { $gte: past7Days } } },
+        { $group: { _id: { $dayOfWeek: "$createdAt" }, amount: { $sum: "$total" } } },
+        {
+          $addFields: {
+            day: {
+              $let: {
+                vars: { days: [null, "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] },
+                in: { $arrayElemAt: ["$$days", "$_id"] },
               },
-              in: { $arrayElemAt: ["$$days", "$_id"] },
             },
           },
         },
-      },
-      { $project: { day: 1, amount: 1, _id: 0 } },
-    ]);
-
-    const weeklySales = await Transactions.aggregate([
-      {
-        $match: {
-          status: "completed",
-          createdAt: { $gte: past7Weeks },
-        },
-      },
-      {
-        $group: {
-          _id: {
-            year: { $year: "$createdAt" },
-            week: { $isoWeek: "$createdAt" },
+        { $project: { day: 1, amount: 1, _id: 0 } },
+      ]),
+      Transactions.aggregate([
+        { $match: { status: "completed", createdAt: { $gte: past7Weeks } } },
+        {
+          $group: {
+            _id: { year: { $year: "$createdAt" }, week: { $isoWeek: "$createdAt" } },
+            amount: { $sum: "$total" },
           },
-          amount: { $sum: "$total" },
         },
-      },
-      {
-        $sort: { "_id.year": 1, "_id.week": 1 },
-      },
-      {
-        $project: {
-          week: {
-            $concat: [
-              { $toString: "$_id.year" },
-              "-W",
-              { $toString: "$_id.week" },
-            ],
+        { $sort: { "_id.year": 1, "_id.week": 1 } },
+        {
+          $project: {
+            week: { $concat: [{ $toString: "$_id.year" }, "-W", { $toString: "$_id.week" }] },
+            amount: 1,
+            _id: 0,
           },
-          amount: 1,
-          _id: 0,
         },
-      },
-    ]);
-
-    const monthlySales = await Transactions.aggregate([
-      {
-        $match: {
-          status: "completed",
-          createdAt: { $gte: past12Months },
-        },
-      },
-      {
-        $group: {
-          _id: {
-            year: { $year: "$createdAt" },
-            month: { $month: "$createdAt" },
+      ]),
+      Transactions.aggregate([
+        { $match: { status: "completed", createdAt: { $gte: past12Months } } },
+        {
+          $group: {
+            _id: { year: { $year: "$createdAt" }, month: { $month: "$createdAt" } },
+            amount: { $sum: "$total" },
           },
-          amount: { $sum: "$total" },
         },
-      },
-      {
-        $sort: { "_id.year": 1, "_id.month": 1 },
-      },
-      {
-        $project: {
-          month: {
-            $concat: [
-              { $toString: "$_id.year" },
-              "-",
-              {
-                $cond: [
-                  { $lt: ["$_id.month", 10] },
-                  { $concat: ["0", { $toString: "$_id.month" }] },
-                  { $toString: "$_id.month" },
-                ],
-              },
-            ],
+        { $sort: { "_id.year": 1, "_id.month": 1 } },
+        {
+          $project: {
+            month: {
+              $concat: [
+                { $toString: "$_id.year" },
+                "-",
+                {
+                  $cond: [
+                    { $lt: ["$_id.month", 10] },
+                    { $concat: ["0", { $toString: "$_id.month" }] },
+                    { $toString: "$_id.month" },
+                  ],
+                },
+              ],
+            },
+            amount: 1,
+            _id: 0,
           },
-          amount: 1,
-          _id: 0,
         },
-      },
+      ]),
+      Promise.all([
+        getTopSellingProducts(startOfToday, "day"),
+        getTopSellingProducts(startOfWeek, "week"),
+        getTopSellingProducts(startOfMonth, "month"),
+      ]),
+      Transactions.aggregate([
+        { $match: { status: "completed", createdAt: { $gte: startOfLastMonth, $lt: endOfLastMonth } } },
+        { $group: { _id: null, totalSales: { $sum: 1 }, totalIncome: { $sum: "$total" } } },
+      ]),
+      Products.aggregate([
+        { $match: { quantityRemaining: { $gt: 0 }, is_deleted: false } },
+        { $group: { _id: null, totalInventoryValue: { $sum: { $multiply: ["$quantityRemaining", "$price"] } } } },
+      ]),
+      Products.aggregate([
+        { $match: { quantityRemaining: { $gt: 0 }, is_deleted: false, updatedAt: { $gte: startOfLastMonth, $lt: endOfLastMonth } } },
+        { $group: { _id: null, totalInventoryValue: { $sum: { $multiply: ["$quantityRemaining", "$price"] } } } },
+      ]),
+      Products.countDocuments({
+        $expr: { $lte: ["$quantityRemaining", "$quantityThreshold"] },
+        is_deleted: false,
+        updatedAt: { $gte: startOfCurrentMonth, $lt: endOfCurrentMonth },
+      }),
+      Products.countDocuments({
+        $expr: { $lte: ["$quantityRemaining", "$quantityThreshold"] },
+        is_deleted: false,
+        updatedAt: { $gte: startOfLastMonth, $lt: endOfLastMonth },
+      }),
+      Products.countDocuments({
+        quantityRemaining: { $gt: 0 },
+        is_deleted: false,
+        updatedAt: { $gte: startOfLastMonth, $lt: endOfLastMonth },
+      }),
     ]);
 
-    const [topDaily, topWeekly, topMonthly] = await Promise.all([
-      getTopSellingProducts(startOfToday, "day"),
-      getTopSellingProducts(startOfWeek, "week"),
-      getTopSellingProducts(startOfMonth, "month"),
-    ]);
-
-    const [lastMonthStats] = await Transactions.aggregate([
-      {
-        $match: {
-          status: "completed",
-          createdAt: { $gte: startOfLastMonth, $lt: endOfLastMonth },
-        },
-      },
-      {
-        $group: {
-          _id: null,
-          totalSales: { $sum: 1 },
-          totalIncome: { $sum: "$total" },
-        },
-      },
-    ]);
-
-    const [inventoryValueResult] = await Products.aggregate([
-      {
-        $match: {
-          quantityRemaining: { $gt: 0 },
-          is_deleted: false,
-        },
-      },
-      {
-        $project: {
-          inventoryValue: { $multiply: ["$quantityRemaining", "$price"] },
-        },
-      },
-      {
-        $group: {
-          _id: null,
-          totalInventoryValue: { $sum: "$inventoryValue" },
-        },
-      },
-    ]);
+    const [topDaily, topWeekly, topMonthly] = topSellingResults;
 
     const totalInventoryValue = inventoryValueResult?.totalInventoryValue || 0;
-
-    const [lastMonthInventoryValueResult] = await Products.aggregate([
-      {
-        $match: {
-          quantityRemaining: { $gt: 0 },
-          is_deleted: false,
-          updatedAt: { $gte: startOfLastMonth, $lt: endOfLastMonth },
-        },
-      },
-      {
-        $project: {
-          inventoryValue: { $multiply: ["$quantityRemaining", "$price"] },
-        },
-      },
-      {
-        $group: {
-          _id: null,
-          totalInventoryValue: { $sum: "$inventoryValue" },
-        },
-      },
-    ]);
-
     const lastMonthInventoryValue = lastMonthInventoryValueResult?.totalInventoryValue || 0;
 
     const inventoryValueTrend =
@@ -790,12 +731,6 @@ const getSalesStatistics = async (req, res, next) => {
 
     const salesTrend = lastSales === 0 ? 100 : ((currentSales - lastSales) / lastSales) * 100;
     const incomeTrend = lastIncome === 0 ? 100 : ((currentIncome - lastIncome) / lastIncome) * 100;
-
-    const lastMonthActiveProducts = await Products.countDocuments({
-      quantityRemaining: { $gt: 0 },
-      is_deleted: false,
-      updatedAt: { $gte: startOfLastMonth, $lt: endOfLastMonth },
-    });
 
     const activeProductTrend =
       lastMonthActiveProducts === 0
@@ -844,18 +779,6 @@ const getSalesStatistics = async (req, res, next) => {
       paddedMonthlySales.push({ month: key, amount: found ? found.amount : 0 });
     }
 
-    const lowStockCount = await Products.countDocuments({
-      $expr: { $lte: ["$quantityRemaining", "$quantityThreshold"] },
-      is_deleted: false,
-      updatedAt: { $gte: startOfCurrentMonth, $lt: new Date(now.getFullYear(), now.getMonth() + 1, 1) },
-    });
-
-    const lowStockLastMonth = await Products.countDocuments({
-      $expr: { $lte: ["$quantityRemaining", "$quantityThreshold"] },
-      is_deleted: false,
-      updatedAt: { $gte: startOfLastMonth, $lt: endOfLastMonth },
-    });
-
     const lowStockTrend =
       lowStockLastMonth === 0
       ? 100
@@ -899,9 +822,10 @@ const getSalesStatistics = async (req, res, next) => {
 const getAllTransactions = async (req, res) => {
   try {
     const transactions = await Transactions.find()
-      .populate("cashier", "name") // assuming 'name' is a field in users
+      .populate("cashier", "name")
       .populate("partsman", "name")
-      .populate("items._id", "name"); // assuming 'name' is a field in products
+      .populate("items._id", "name")
+      .lean();
 
     return res.status(200).json({
       status: "success",

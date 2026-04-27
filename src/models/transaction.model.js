@@ -48,6 +48,10 @@ const transactionSchema = new mongoose.Schema({
   { timestamps: true }
 );
 
+transactionSchema.index({ status: 1, createdAt: -1 });
+transactionSchema.index({ invoiceId: 1 });
+transactionSchema.index({ cashier: 1, createdAt: -1 });
+
 const Transactions = mongoose.model("transactions", transactionSchema);
 
 module.exports = Transactions;

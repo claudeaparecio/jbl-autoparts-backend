@@ -73,7 +73,7 @@ const signUp = async (req, res) => {
   try {
     // @ts-ignore
     const user = await User.signup(username, password, role, name, customRole);
-    const token = createToken(user._id);
+    const token = createToken(user);
     return res.json({
       status: "success",
       token,
@@ -101,7 +101,7 @@ const logIn = async (req, res) => {
       });
     }
 
-    const token = createToken(user._id);
+    const token = createToken(user);
 
     await Session.create({
       userId: user._id,

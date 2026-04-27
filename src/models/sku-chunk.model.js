@@ -14,6 +14,8 @@ const skuChunk = new mongoose.Schema({
   timestamps: true
 });
 
+skuChunk.index({ chunk: 1, order: 1 });
+
 const SKUChunks = mongoose.model("skuChunks", skuChunk);
 
 module.exports = SKUChunks;

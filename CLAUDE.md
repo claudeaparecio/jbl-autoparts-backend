@@ -77,6 +77,22 @@ Controllers use one of two patterns:
 
 Throw operational errors using `new AppError(message, statusCode)` from [src/utils/AppError.js](src/utils/AppError.js). Async route handlers that use `next` should be wrapped with `catchAsync` from [src/utils/catchAsync.js](src/utils/catchAsync.js).
 
+## Performance Optimization
+
+- Use `lean()` on read/list Mongoose queries to avoid full document hydration for responses.
+- Use `.select(...)` projection to fetch only the fields required by each endpoint.
+- Avoid `.populate()` unless the route truly needs referenced documents; prefer denormalized fields or lightweight manual joins.
+- Add indexes on frequently filtered/sorted fields:
+  - `User`: `username`, `email`
+  - `Product`: `sku`, `parentId`, `is_deleted`, `quantityRemaining`
+  - `Transaction`: `state`, `invoice`, `createdAt`
+  - `Session`: `user`, `isActive`
+  - `SKUChunk`: `(chunk, order)`
+- Batch independent DB operations with `Promise.all` instead of sequential awaits where possible.
+- Use atomic update operators (`$inc`, `$set`) and `updateOne`/`findOneAndUpdate` inside MongoDB sessions rather than read-modify-write cycles.
+- Eliminate repeated lookup of the same document within one request.
+- Avoid unnecessary `countDocuments` or extra aggregation steps on hot endpoints.
+
 ## Deployment
 
 Deployed to Vercel (see [vercel.json](vercel.json)) — all routes rewrite to `src/server.js`. The Cloudinary credentials in [src/utils/cloudinary.js](src/utils/cloudinary.js) are currently hard-coded rather than read from env.

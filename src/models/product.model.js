@@ -66,16 +66,18 @@ const products = new mongoose.Schema({
 });
 
 
-const Products = mongoose.model("products", products);
-
+products.index({ is_deleted: 1, status: 1 });
+products.index({ is_deleted: 1, parentId: 1 });
+products.index({ quantityRemaining: 1, is_deleted: 1 });
 products.index({
   name: "text",
   brand: "text",
   description: "text",
   uniqueCode: "text",
   partNumber: "text",
-  status: "text",
-  tags: "text"
+  tags: "text",
 });
+
+const Products = mongoose.model("products", products);
 
 module.exports = Products;

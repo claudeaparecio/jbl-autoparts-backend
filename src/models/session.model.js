@@ -24,4 +24,6 @@ const sessionSchema = new mongoose.Schema({
   },
 });
 
+sessionSchema.index({ token: 1, isActive: 1 });
+
 module.exports = mongoose.model("sessions", sessionSchema);

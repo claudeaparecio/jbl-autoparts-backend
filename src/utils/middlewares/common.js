@@ -1,6 +1,5 @@
 const jwt = require("jsonwebtoken");
 const AppError = require("../AppError");
-const UserModel = require("../../models/user.model");
 const Session = require("../../models/session.model");
 
 const extractUser = async (req, next) => {
@@ -17,14 +16,13 @@ const extractUser = async (req, next) => {
     const decoded = jwt.verify(token, process.env.SECRET_JWT);
     req.user = decoded;
 
-    const session = await Session.findOne({ token, isActive: true });
-    if (!session) return res.status(401).json({ message: "Session expired or invalid" });
+    const session = await Session.findOne({ token, isActive: true }).select("_id").lean();
+    if (!session) return null;
 
-    const user = await UserModel.findById(decoded._id);
-    return user;
+    return decoded;
   } catch (err) {
     return null;
   }
-}
+};
 
 module.exports = extractUser;

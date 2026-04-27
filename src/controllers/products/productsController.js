@@ -2,8 +2,6 @@ const Product = require("../../models/product.model");
 const SKUChunk = require("../../models/sku-chunk.model");
 const SKU = require("../../models/sku.model");
 const ErrorCodes = require("../../utils/ErrorCodes");
-const fs = require('fs');
-const path = require('path');
 const uploadToCloudinary = require("../../utils/uploadToCloudinary");
 
 
@@ -11,39 +9,23 @@ const getProductById = async (req, res, next) => {
   try {
     const { productId } = req.params;
 
-    const product = await Product.findOne({
-      $and: [
-        { _id: productId },
-        { is_deleted: false }
-      ]
-    })
-      .populate({
-        path: "sku",
-        populate: {
-          path: "skuChunks",
-          options: { sort: { order: 1 } },
-        },
-      })
-      .lean();
+    const [product, productVariants] = await Promise.all([
+      Product.findOne({ _id: productId, is_deleted: false })
+        .populate({
+          path: "sku",
+          populate: { path: "skuChunks", options: { sort: { order: 1 } } },
+        })
+        .lean(),
+      Product.find({ parentId: productId, is_deleted: false }).lean(),
+    ]);
 
-    const chunks = product.sku?.skuChunks || [];
+    const chunks = product?.sku?.skuChunks || [];
     const skuString = chunks.map((chunk) => chunk.chunk).join("-");
-
-    const productVariants = await Product.find({
-      parentId: productId,
-      is_deleted: false
-    }).lean();
-
-    const formattedProducts = {
-      ...product,
-      sku: skuString,
-      variants: productVariants,
-    };
 
     return res.json({
       status: "success",
       data: {
-        product: formattedProducts,
+        product: { ...product, sku: skuString, variants: productVariants },
       },
     });
   } catch (error) {
@@ -84,9 +66,9 @@ const getProducts = async (req, res, next) => {
       ...(noVariant && { parentId: null }),
     };
 
-    const total = await Product.countDocuments(filter);
-
-    const products = await Product.aggregate([
+    const [total, products] = await Promise.all([
+      Product.countDocuments(filter),
+      Product.aggregate([
       { $match: filter },
       {
         $addFields: {
@@ -126,6 +108,7 @@ const getProducts = async (req, res, next) => {
       { $sort: { matchScore: -1, createdAt: -1 } },
       { $skip: skip },
       { $limit: limit },
+    ]),
     ]);
 
     const formattedProducts = products.map((product) => {
@@ -161,13 +144,8 @@ const createProduct = async (req, res) => {
     const existingImages = req.body.existingImages
       ? JSON.parse(req.body.existingImages)
       : [];
-    console.log(req.body);
-    console.log(uploadedFiles);
     const newImagePaths = await Promise.all(
-      uploadedFiles.map((file) =>{
-        console.log(file.buffer, file.originalname)
-        return uploadToCloudinary(file.buffer, file.originalname)
-      })
+      uploadedFiles.map((file) => uploadToCloudinary(file.buffer, file.originalname))
     );
 
     const finalImages = [...existingImages, ...newImagePaths];
@@ -382,38 +360,18 @@ const updateProduct = async (req, res) => {
 
 const deleteProduct = async (req, res, next) => {
   try {
-    const {
-      productId
-    } = req.params;
+    const { productId } = req.params;
 
-    const product = await Product.findById(productId);
+    const result = await Product.findOneAndUpdate(
+      { _id: productId, is_deleted: false },
+      { is_deleted: true }
+    ).lean();
 
-    if (!product) {
-      return res.status(404).json({
-        message: "Product not found."
-      });
+    if (!result) {
+      return res.status(404).json({ message: "Product not found." });
     }
 
-    // *** To be investigated, if we should delete image assets ***
-    // if (product.images && Array.isArray(product.images)) {
-    //   for (const imgPath of product.images) {
-    //     const fullPath = path.join(__dirname, "../../../", imgPath);
-    //     fs.unlink(fullPath, (err) => {
-    //       if (err) {
-    //         console.error(`Failed to delete image at ${fullPath}:`, err.message);
-    //       } else {
-    //         console.log(`Deleted image at ${fullPath}`);
-    //       }
-    //     });
-    //   }
-    // }
-
-    product.is_deleted = true;
-    await product.save();
-
-    res.status(200).json({
-      message: "Success.",
-    });
+    res.status(200).json({ message: "Success." });
   } catch (error) {
     return res.status(ErrorCodes.INTERNAL_SERVER_ERROR).json({
       status: "failed",
@@ -430,7 +388,10 @@ const getAllProductsByStatus = async (req, res) => {
       is_deleted: false,
       ...(status && { status })
     }
-    const products = await Product.find(productsFilter).sort({ name: 1 });
+    const products = await Product.find(productsFilter)
+      .sort({ name: 1 })
+      .select("name price status quantityRemaining quantityThreshold quantitySold brand partNumber uniqueCode sku tags images parentId")
+      .lean();
 
     return res.status(200).json({
       status: 'success',
