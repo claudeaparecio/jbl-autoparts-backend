@@ -406,6 +406,37 @@ const getAllProductsByStatus = async (req, res) => {
   }
 };
 
+const getProductStatistics = async (req, res, next) => {
+  try {
+    const [result] = await Product.aggregate([
+      { $match: { is_deleted: false } },
+      {
+        $facet: {
+          active:      [{ $match: { status: "available" } },    { $count: "count" }],
+          lowStock:    [{ $match: { status: "low_in_stock" } }, { $count: "count" }],
+          outOfStock:  [{ $match: { status: "out_of_stock" } }, { $count: "count" }],
+          inventoryValue: [
+            { $match: { quantityRemaining: { $gt: 0 } } },
+            { $group: { _id: null, total: { $sum: { $multiply: ["$quantityRemaining", "$price"] } } } },
+          ],
+        },
+      },
+    ]);
+
+    return res.json({
+      status: "success",
+      data: {
+        active_products:       result.active[0]?.count      ?? 0,
+        low_stock:             result.lowStock[0]?.count    ?? 0,
+        out_of_stock:          result.outOfStock[0]?.count  ?? 0,
+        total_inventory_value: result.inventoryValue[0]?.total ?? 0,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getProducts,
   createProduct,
@@ -413,4 +444,5 @@ module.exports = {
   deleteProduct,
   getProductById,
   getAllProductsByStatus,
+  getProductStatistics,
 };

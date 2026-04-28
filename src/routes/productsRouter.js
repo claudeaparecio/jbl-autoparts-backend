@@ -6,7 +6,8 @@ const {
   updateProduct,
   deleteProduct,
   getProductById,
-  getAllProductsByStatus
+  getAllProductsByStatus,
+  getProductStatistics,
 } = require("../controllers/products/productsController");
 const adminAuthGuard = require("../utils/middlewares/adminAuth");
 const ProductValidator = require("../controllers/products/validators/productValidator");
@@ -20,6 +21,8 @@ Router.post('/', adminAuthGuard, upload.array("files"), ProductValidator, create
 Router.get('/', authGuard, getProducts);
 
 Router.get('/products-by-status', authGuard, getAllProductsByStatus);
+
+Router.get('/statistics', adminAuthGuard, getProductStatistics);
 
 Router.get('/:productId', authGuard, getProductById);
 
