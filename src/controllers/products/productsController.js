@@ -111,14 +111,15 @@ const getProducts = async (req, res, next) => {
     ]),
     ]);
 
-    const formattedProducts = products.map((product) => {
-      // @ts-ignore
+    const populated = await Product.populate(products, {
+      path: "sku",
+      populate: { path: "skuChunks", options: { sort: { order: 1 } } },
+    });
+
+    const formattedProducts = populated.map((product) => {
       const chunks = product.sku?.skuChunks || [];
       const skuString = chunks.map((chunk) => chunk.chunk).join("-");
-      return {
-        ...product,
-        sku: skuString,
-      };
+      return { ...product, sku: skuString };
     });
 
     return res.json({
